@@ -1,10 +1,11 @@
 import os
 import math
 import logging
+import pickle
 from typing import Iterable, List
 from datasets import load_dataset
 from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import build_vocab_from_iterator
+from torchtext.vocab import build_vocab_from_iterator, Vocab
 import torch
 import torch.nn as nn
 from torch.nn import Transformer
@@ -32,26 +33,39 @@ def yield_tokens(data_iter: Iterable, language: str) -> List[str]:
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 special_symbols = ['<unk>', '<pad>', '<bos>', '<eos>']
 
-logging.info("Loading dataset...")
-start_time = timer()
+cache_dir = 'cache'
+os.makedirs(cache_dir, exist_ok=True)
+
+def save_vocab(vocab: Vocab, path: str):
+    with open(path, 'wb') as f:
+        pickle.dump(vocab, f)
+
+def load_vocab(path: str) -> Vocab:
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
 dataset = load_dataset('opus100', f'{SRC_LANGUAGE}-{TGT_LANGUAGE}')
-end_time = timer()
-logging.info(f"Dataset loaded in {end_time - start_time:.3f}s")
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    logging.info(f"Building vocabulary for {ln}...")
-    start_time = timer()
-    vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(dataset['train'], ln),
-                                                    min_freq=1,
-                                                    specials=special_symbols,
-                                                    special_first=True)
-    end_time = timer()
-    logging.info(f"Vocabulary for {ln} built in {end_time - start_time:.3f}s")
-    
+    vocab_path = os.path.join(cache_dir, f'{ln}_vocab.pkl')
+    if os.path.exists(vocab_path):
+        logging.info(f"Loading cached vocabulary for {ln}...")
+        vocab_transform[ln] = load_vocab(vocab_path)
+    else:
+        logging.info(f"Building vocabulary for {ln}...")
+        start_time = timer()
+        vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(dataset['train'], ln),
+                                                        min_freq=1,
+                                                        specials=special_symbols,
+                                                        special_first=True)
+        end_time = timer()
+        logging.info(f"Vocabulary for {ln} built in {end_time - start_time:.3f}s")
+        save_vocab(vocab_transform[ln], vocab_path)
+
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
 
-DEVICE = torch.device('cuda:0')
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 class PositionalEncoding(nn.Module):
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000):
@@ -126,9 +140,10 @@ TGT_VOCAB_SIZE = len(vocab_transform[TGT_LANGUAGE])
 EMB_SIZE = 512
 NHEAD = 8
 FFN_HID_DIM = 512
-BATCH_SIZE = 1
+BATCH_SIZE = 32
 NUM_ENCODER_LAYERS = 3
 NUM_DECODER_LAYERS = 3
+GRADIENT_ACCUMULATION_STEPS = 2
 
 transformer = Seq2SeqTransformer(NUM_ENCODER_LAYERS, NUM_DECODER_LAYERS, EMB_SIZE, NHEAD, SRC_VOCAB_SIZE, TGT_VOCAB_SIZE, FFN_HID_DIM)
 
@@ -180,21 +195,18 @@ def collate_fn(batch):
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX)
     return src_batch, tgt_batch
 
-logging.info("Creating datasets and dataloaders...")
-start_time = timer()
 train_dataset = TranslationDataset(dataset['train'])
 val_dataset = TranslationDataset(dataset['validation'])
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
-end_time = timer()
-logging.info(f"Datasets and dataloaders created in {end_time - start_time:.3f}s")
 
 def train_epoch(model, optimizer):
     model.train()
     losses = 0
     start_time = timer()
-    for src, tgt in train_dataloader:
+    optimizer.zero_grad()
+    for i, (src, tgt) in enumerate(train_dataloader):
         src = src.to(DEVICE)
         tgt = tgt.to(DEVICE)
 
@@ -204,13 +216,14 @@ def train_epoch(model, optimizer):
 
         logits = model(src, tgt_input, src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, src_padding_mask)
 
-        optimizer.zero_grad()
-
         tgt_out = tgt[1:, :]
         loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
         loss.backward()
 
-        optimizer.step()
+        if (i + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
         losses += loss.item()
     end_time = timer()
     logging.info(f"Training epoch time: {end_time - start_time:.3f}s")
