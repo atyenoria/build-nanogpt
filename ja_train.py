@@ -1,11 +1,6 @@
 import os
 import math
 import logging
-import pickle
-from typing import Iterable, List
-from datasets import load_dataset
-from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import build_vocab_from_iterator, Vocab
 import torch
 import torch.nn as nn
 from torch.nn import Transformer
@@ -13,60 +8,39 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from torch import Tensor
 from timeit import default_timer as timer
+import pickle
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 SRC_LANGUAGE = 'en'
 TGT_LANGUAGE = 'ja'
-token_transform = {}
-vocab_transform = {}
-
-token_transform[SRC_LANGUAGE] = get_tokenizer('spacy', language='ja_core_news_sm')
-token_transform[TGT_LANGUAGE] = get_tokenizer('spacy', language='en_core_web_sm')
-
-def yield_tokens(data_iter: Iterable, language: str) -> List[str]:
-    language_index = {SRC_LANGUAGE: 'translation', TGT_LANGUAGE: 'translation'}
-    for data_sample in data_iter:
-        yield token_transform[language](data_sample[language_index[language]][language])
-
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
-special_symbols = ['<unk>', '<pad>', '<bos>', '<eos>']
+BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 2
+NUM_EPOCHS = 18
+EMB_SIZE = 512
+NHEAD = 8
+FFN_HID_DIM = 512
+NUM_ENCODER_LAYERS = 3
+NUM_DECODER_LAYERS = 3
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
+# Load vocabularies
 cache_dir = 'cache'
-os.makedirs(cache_dir, exist_ok=True)
-
-def save_vocab(vocab: Vocab, path: str):
-    with open(path, 'wb') as f:
-        pickle.dump(vocab, f)
-
 def load_vocab(path: str) -> Vocab:
     with open(path, 'rb') as f:
         return pickle.load(f)
 
-dataset = load_dataset('opus100', f'{SRC_LANGUAGE}-{TGT_LANGUAGE}')
-
-for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    vocab_path = os.path.join(cache_dir, f'{ln}_vocab.pkl')
-    if os.path.exists(vocab_path):
-        logging.info(f"Loading cached vocabulary for {ln}...")
-        vocab_transform[ln] = load_vocab(vocab_path)
-    else:
-        logging.info(f"Building vocabulary for {ln}...")
-        start_time = timer()
-        vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(dataset['train'], ln),
-                                                        min_freq=1,
-                                                        specials=special_symbols,
-                                                        special_first=True)
-        end_time = timer()
-        logging.info(f"Vocabulary for {ln} built in {end_time - start_time:.3f}s")
-        save_vocab(vocab_transform[ln], vocab_path)
+vocab_transform = {
+    SRC_LANGUAGE: load_vocab(os.path.join(cache_dir, f'{SRC_LANGUAGE}_vocab.pkl')),
+    TGT_LANGUAGE: load_vocab(os.path.join(cache_dir, f'{TGT_LANGUAGE}_vocab.pkl'))
+}
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
 
-DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
+# Transformer model definition
 class PositionalEncoding(nn.Module):
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000):
         super(PositionalEncoding, self).__init__()
@@ -117,6 +91,7 @@ class Seq2SeqTransformer(nn.Module):
     def decode(self, tgt: Tensor, memory: Tensor, tgt_mask: Tensor):
         return self.transformer.decoder(self.positional_encoding(self.tgt_tok_emb(tgt)), memory, tgt_mask)
 
+# Masking functions
 def generate_square_subsequent_mask(sz):
     mask = (torch.triu(torch.ones((sz, sz), device=DEVICE)) == 1).transpose(0, 1)
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
@@ -133,30 +108,7 @@ def create_mask(src, tgt):
     tgt_padding_mask = (tgt == PAD_IDX).transpose(0, 1)
     return src_mask, tgt_mask, src_padding_mask, tgt_padding_mask
 
-torch.manual_seed(0)
-
-SRC_VOCAB_SIZE = len(vocab_transform[SRC_LANGUAGE])
-TGT_VOCAB_SIZE = len(vocab_transform[TGT_LANGUAGE])
-EMB_SIZE = 512
-NHEAD = 8
-FFN_HID_DIM = 512
-BATCH_SIZE = 32
-NUM_ENCODER_LAYERS = 3
-NUM_DECODER_LAYERS = 3
-GRADIENT_ACCUMULATION_STEPS = 2
-
-transformer = Seq2SeqTransformer(NUM_ENCODER_LAYERS, NUM_DECODER_LAYERS, EMB_SIZE, NHEAD, SRC_VOCAB_SIZE, TGT_VOCAB_SIZE, FFN_HID_DIM)
-
-for p in transformer.parameters():
-    if p.dim() > 1:
-        nn.init.xavier_uniform_(p)
-
-transformer = transformer.to(DEVICE)
-
-loss_fn = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-
-optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
-
+# Data preparation
 def sequential_transforms(*transforms):
     def func(txt_input):
         for transform in transforms:
@@ -171,7 +123,7 @@ def tensor_transform(token_ids: List[int]):
 
 text_transform = {}
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    text_transform[ln] = sequential_transforms(token_transform[ln], vocab_transform[ln], tensor_transform)
+    text_transform[ln] = sequential_transforms(lambda x: x, vocab_transform[ln], tensor_transform)
 
 class TranslationDataset(Dataset):
     def __init__(self, data):
@@ -195,13 +147,8 @@ def collate_fn(batch):
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX)
     return src_batch, tgt_batch
 
-train_dataset = TranslationDataset(dataset['train'])
-val_dataset = TranslationDataset(dataset['validation'])
-
-train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
-val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
-
-def train_epoch(model, optimizer):
+# Model training and evaluation
+def train_epoch(model, optimizer, train_dataloader):
     model.train()
     losses = 0
     start_time = timer()
@@ -230,7 +177,7 @@ def train_epoch(model, optimizer):
 
     return losses / len(train_dataloader)
 
-def evaluate(model):
+def evaluate(model, val_dataloader):
     model.eval()
     losses = 0
     start_time = timer()
@@ -253,52 +200,40 @@ def evaluate(model):
 
     return losses / len(val_dataloader)
 
-NUM_EPOCHS = 18
-model_dir = "saved_models"
-os.makedirs(model_dir, exist_ok=True)
+if __name__ == "__main__":
+    # Load datasets
+    with open('train_dataset.pkl', 'rb') as f:
+        train_dataset = pickle.load(f)
+    with open('val_dataset.pkl', 'rb') as f:
+        val_dataset = pickle.load(f)
 
-for epoch in range(1, NUM_EPOCHS + 1):
-    start_time = timer()
-    train_loss = train_epoch(transformer, optimizer)
-    val_loss = evaluate(transformer)
-    end_time = timer()
-    epoch_time = end_time - start_time
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
+    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
-    # Log and save model
-    logging.info(f"Epoch: {epoch}, Train loss: {train_loss:.3f}, Val loss: {val_loss:.3f}, Epoch time = {epoch_time:.3f}s")
-    model_path = os.path.join(model_dir, f"transformer_epoch_{epoch}.pth")
-    torch.save(transformer.state_dict(), model_path)
+    # Initialize model, loss function, and optimizer
+    transformer = Seq2SeqTransformer(NUM_ENCODER_LAYERS, NUM_DECODER_LAYERS, EMB_SIZE, NHEAD, 
+                                     len(vocab_transform[SRC_LANGUAGE]), len(vocab_transform[TGT_LANGUAGE]), FFN_HID_DIM)
+    transformer = transformer.to(DEVICE)
 
-def greedy_decode(model, src, src_mask, max_len, start_symbol):
-    src = src.to(DEVICE)
-    src_mask = src_mask.to(DEVICE)
+    for p in transformer.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
 
-    memory = model.encode(src, src_mask)
-    ys = torch.ones(1, 1).fill_(start_symbol).type(torch.long).to(DEVICE)
-    for i in range(max_len - 1):
-        memory = memory.to(DEVICE)
-        tgt_mask = (generate_square_subsequent_mask(ys.size(0)).type(torch.bool)).to(DEVICE)
-        out = model.decode(ys, memory, tgt_mask)
-        out = out.transpose(0, 1)
-        prob = model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
-        next_word = next_word.item()
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
 
-        ys = torch.cat([ys, torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=0)
-        if next_word == EOS_IDX:
-            break
-    return ys
+    # Training loop
+    model_dir = "saved_models"
+    os.makedirs(model_dir, exist_ok=True)
 
-def translate(model: torch.nn.Module, src_sentence: str):
-    model.eval()
-    src = text_transform[SRC_LANGUAGE](src_sentence).view(-1, 1)
-    num_tokens = src.shape[0]
-    src_mask = (torch.zeros(num_tokens, num_tokens)).type(torch.bool)
-    tgt_tokens = greedy_decode(model, src, src_mask, max_len=num_tokens + 5, start_symbol=BOS_IDX).flatten()
-    translation = " ".join(vocab_transform[TGT_LANGUAGE].lookup_tokens(list(tgt_tokens.cpu().numpy()))).replace("<bos>", "").replace("<eos>", "")
-    return translation
+    for epoch in range(1, NUM_EPOCHS + 1):
+        start_time = timer()
+        train_loss = train_epoch(transformer, optimizer, train_dataloader)
+        val_loss = evaluate(transformer, val_dataloader)
+        end_time = timer()
+        epoch_time = end_time - start_time
 
-# Load the model from the last epoch and perform inference
-last_model_path = os.path.join(model_dir, f"transformer_epoch_{NUM_EPOCHS}.pth")
-transformer.load_state_dict(torch.load(last_model_path))
-print(translate(transformer, "Please Translate"))
+        # Log and save model
+        logging.info(f"Epoch: {epoch}, Train loss: {train_loss:.3f}, Val loss: {val_loss:.3f}, Epoch time = {epoch_time:.3f}s")
+        model_path = os.path.join(model_dir, f"transformer_epoch_{epoch}.pth")
+        torch.save(transformer.state_dict(), model_path)
