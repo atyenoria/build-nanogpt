@@ -1,3 +1,6 @@
+import torchtext
+torchtext.disable_torchtext_deprecation_warning()
+
 import os
 import math
 import logging
@@ -9,6 +12,9 @@ from torch.utils.data import DataLoader, Dataset
 from torch import Tensor
 from timeit import default_timer as timer
 import pickle
+from torchtext.vocab import Vocab
+from torchtext.data.utils import get_tokenizer
+from typing import List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -39,6 +45,12 @@ vocab_transform = {
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
+
+# Tokenizers
+token_transform = {
+    SRC_LANGUAGE: get_tokenizer('spacy', language='en_core_web_sm'),
+    TGT_LANGUAGE: get_tokenizer('spacy', language='ja_core_news_sm')
+}
 
 # Transformer model definition
 class PositionalEncoding(nn.Module):
@@ -123,7 +135,7 @@ def tensor_transform(token_ids: List[int]):
 
 text_transform = {}
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    text_transform[ln] = sequential_transforms(lambda x: x, vocab_transform[ln], tensor_transform)
+    text_transform[ln] = sequential_transforms(token_transform[ln], vocab_transform[ln].lookup_indices, tensor_transform)
 
 class TranslationDataset(Dataset):
     def __init__(self, data):
