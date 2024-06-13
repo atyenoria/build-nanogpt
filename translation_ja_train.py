@@ -32,17 +32,26 @@ def yield_tokens(data_iter: Iterable, language: str) -> List[str]:
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 special_symbols = ['<unk>', '<pad>', '<bos>', '<eos>']
 
+logging.info("Loading dataset...")
+start_time = timer()
 dataset = load_dataset('opus100', f'{SRC_LANGUAGE}-{TGT_LANGUAGE}')
+end_time = timer()
+logging.info(f"Dataset loaded in {end_time - start_time:.3f}s")
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
+    logging.info(f"Building vocabulary for {ln}...")
+    start_time = timer()
     vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(dataset['train'], ln),
                                                     min_freq=1,
                                                     specials=special_symbols,
                                                     special_first=True)
+    end_time = timer()
+    logging.info(f"Vocabulary for {ln} built in {end_time - start_time:.3f}s")
+    
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cuda:0')
 
 class PositionalEncoding(nn.Module):
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000):
@@ -117,7 +126,7 @@ TGT_VOCAB_SIZE = len(vocab_transform[TGT_LANGUAGE])
 EMB_SIZE = 512
 NHEAD = 8
 FFN_HID_DIM = 512
-BATCH_SIZE = 128
+BATCH_SIZE = 1
 NUM_ENCODER_LAYERS = 3
 NUM_DECODER_LAYERS = 3
 
@@ -171,15 +180,20 @@ def collate_fn(batch):
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX)
     return src_batch, tgt_batch
 
+logging.info("Creating datasets and dataloaders...")
+start_time = timer()
 train_dataset = TranslationDataset(dataset['train'])
 val_dataset = TranslationDataset(dataset['validation'])
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn)
+end_time = timer()
+logging.info(f"Datasets and dataloaders created in {end_time - start_time:.3f}s")
 
 def train_epoch(model, optimizer):
     model.train()
     losses = 0
+    start_time = timer()
     for src, tgt in train_dataloader:
         src = src.to(DEVICE)
         tgt = tgt.to(DEVICE)
@@ -198,12 +212,15 @@ def train_epoch(model, optimizer):
 
         optimizer.step()
         losses += loss.item()
+    end_time = timer()
+    logging.info(f"Training epoch time: {end_time - start_time:.3f}s")
 
     return losses / len(train_dataloader)
 
 def evaluate(model):
     model.eval()
     losses = 0
+    start_time = timer()
     with torch.no_grad():
         for src, tgt in val_dataloader:
             src = src.to(DEVICE)
@@ -218,6 +235,8 @@ def evaluate(model):
             tgt_out = tgt[1:, :]
             loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
             losses += loss.item()
+    end_time = timer()
+    logging.info(f"Validation epoch time: {end_time - start_time:.3f}s")
 
     return losses / len(val_dataloader)
 
@@ -228,8 +247,8 @@ os.makedirs(model_dir, exist_ok=True)
 for epoch in range(1, NUM_EPOCHS + 1):
     start_time = timer()
     train_loss = train_epoch(transformer, optimizer)
-    end_time = timer()
     val_loss = evaluate(transformer)
+    end_time = timer()
     epoch_time = end_time - start_time
 
     # Log and save model
