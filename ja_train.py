@@ -24,12 +24,12 @@ TGT_LANGUAGE = 'ja'
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 BATCH_SIZE = 32
 GRADIENT_ACCUMULATION_STEPS = 2
-NUM_EPOCHS = 36
-EMB_SIZE = 512
-NHEAD = 8
+NUM_EPOCHS = 100
+EMB_SIZE = 1024
+NHEAD = 16
 FFN_HID_DIM = 2048
-NUM_ENCODER_LAYERS = 6
-NUM_DECODER_LAYERS = 6
+NUM_ENCODER_LAYERS = 12
+NUM_DECODER_LAYERS = 12
 DROPOUT = 0.3
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -195,7 +195,6 @@ def evaluate(model, val_dataloader):
             tgt_input = tgt[:-1, :]
 
             src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
-
 
             logits = model(src, tgt_input, src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, src_padding_mask)
 
