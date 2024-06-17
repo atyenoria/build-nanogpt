@@ -50,7 +50,7 @@ def load_and_select_dataset(src_lang, tgt_lang, num_samples=50000):
 
 # Load and select 50,000 samples from the dataset
 logging.info("Loading and selecting dataset")
-train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=100000)
+train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=50000)
 logging.info(f"Loaded {len(train_data)} training samples and {len(val_data)} validation samples")
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
@@ -128,4 +128,3 @@ logging.info("Training dataset saved to train_dataset.pkl")
 with open('val_dataset.pkl', 'wb') as f:
     pickle.dump(val_dataset, f)
 logging.info("Validation dataset saved to val_dataset.pkl")
-
