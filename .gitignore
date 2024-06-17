@@ -1,4 +1,5 @@
-saved_models
+saved_models*
 edu_fineweb10B
 *.pkl
 nohup.*
+cache*

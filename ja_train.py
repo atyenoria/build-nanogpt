@@ -15,6 +15,7 @@ import pickle
 from torchtext.vocab import Vocab
 from torchtext.data.utils import get_tokenizer
 from typing import List
+from tqdm import tqdm
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -165,7 +166,8 @@ def train_epoch(model, optimizer, train_dataloader):
     losses = 0
     start_time = timer()
     optimizer.zero_grad()
-    for i, (src, tgt) in enumerate(train_dataloader):
+    progress_bar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc="Training")
+    for i, (src, tgt) in progress_bar:
         src = src.to(DEVICE)
         tgt = tgt.to(DEVICE)
 
@@ -184,6 +186,22 @@ def train_epoch(model, optimizer, train_dataloader):
             optimizer.zero_grad()
 
         losses += loss.item()
+
+        if (i + 1) % 500 == 0:  # Log every 500 iterations
+            # Decode a single sample for logging
+            src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
+            tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
+            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in logits.argmax(dim=-1)[:, 0].tolist() if idx != PAD_IDX])
+            
+            # Log the decoded sentences and loss
+            logging.info(f"Iteration {i+1}/{len(train_dataloader)}: Loss = {loss.item()}")
+            logging.info(f"Src: {src_sentence}")
+            logging.info(f"True Tgt: {tgt_sentence}")
+            logging.info(f"Pred Tgt: {pred_sentence}")
+        
+        # Update progress bar description with the latest loss
+        progress_bar.set_description(f"Training (loss {loss.item():.4f})")
+
     end_time = timer()
     logging.info(f"Training epoch time: {end_time - start_time:.3f}s")
 
@@ -194,7 +212,7 @@ def evaluate(model, val_dataloader):
     losses = 0
     start_time = timer()
     with torch.no_grad():
-        for src, tgt in val_dataloader:
+        for src, tgt in tqdm(val_dataloader, desc="Validation"):
             src = src.to(DEVICE)
             tgt = tgt.to(DEVICE)
 
@@ -207,6 +225,16 @@ def evaluate(model, val_dataloader):
             tgt_out = tgt[1:, :]
             loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
             losses += loss.item()
+
+            # Decode a single sample for logging
+            src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
+            tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
+            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in logits.argmax(dim=-1)[:, 0].tolist() if idx != PAD_IDX])
+            
+            logging.info(f"Validation - Src: {src_sentence}")
+            logging.info(f"Validation - True Tgt: {tgt_sentence}")
+            logging.info(f"Validation - Pred Tgt: {pred_sentence}")
+
     end_time = timer()
     logging.info(f"Validation epoch time: {end_time - start_time:.3f}s")
 
@@ -239,6 +267,7 @@ if __name__ == "__main__":
     os.makedirs(model_dir, exist_ok=True)
 
     for epoch in range(1, NUM_EPOCHS + 1):
+        logging.info(f"Starting epoch {epoch}/{NUM_EPOCHS}")
         start_time = timer()
         train_loss = train_epoch(transformer, optimizer, train_dataloader)
         val_loss = evaluate(transformer, val_dataloader)
@@ -249,3 +278,5 @@ if __name__ == "__main__":
         logging.info(f"Epoch: {epoch}, Train loss: {train_loss:.3f}, Val loss: {val_loss:.3f}, Epoch time = {epoch_time:.3f}s")
         model_path = os.path.join(model_dir, f"transformer_epoch_{epoch}.pth")
         torch.save(transformer.state_dict(), model_path)
+
+        logging.info(f"Finished epoch {epoch}/{NUM_EPOCHS}")

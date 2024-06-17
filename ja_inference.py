@@ -18,7 +18,7 @@ FFN_HID_DIM = 512
 NUM_ENCODER_LAYERS = 3
 NUM_DECODER_LAYERS = 3
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-MODEL_PATH = 'saved_models/transformer_epoch_2.pth'
+MODEL_PATH = 'saved_models/transformer_epoch_36.pth'
 SRC_VOCAB_PATH = 'cache/en_vocab.pkl'
 TGT_VOCAB_PATH = 'cache/ja_vocab.pkl'
 

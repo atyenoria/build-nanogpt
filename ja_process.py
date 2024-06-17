@@ -1,9 +1,13 @@
 import os
 import pickle
+import logging
 import torch
 from datasets import load_dataset
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator, Vocab
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 SRC_LANGUAGE = 'en'
 TGT_LANGUAGE = 'ja'
@@ -27,24 +31,30 @@ os.makedirs(cache_dir, exist_ok=True)
 def save_vocab(vocab: Vocab, path: str):
     with open(path, 'wb') as f:
         pickle.dump(vocab, f)
+    logging.info(f"Vocabulary saved to {path}")
 
 def load_vocab(path: str) -> Vocab:
     with open(path, 'rb') as f:
-        return pickle.load(f)
+        vocab = pickle.load(f)
+    logging.info(f"Vocabulary loaded from {path}")
+    return vocab
 
-def load_and_select_dataset(src_lang, tgt_lang, num_samples=1000):
+def load_and_select_dataset(src_lang, tgt_lang, num_samples=50000):
     dataset = load_dataset('opus100', f'{src_lang}-{tgt_lang}')
     selected_samples = dataset['train'].select(range(num_samples))
     return selected_samples, dataset['validation']
 
-# Load and select 1000 samples from the dataset
-train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=1000)
+# Load and select 50,000 samples from the dataset
+logging.info("Loading and selecting dataset")
+train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=50000)
+logging.info(f"Loaded {len(train_data)} training samples and {len(val_data)} validation samples")
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_path = os.path.join(cache_dir, f'{ln}_vocab.pkl')
     if os.path.exists(vocab_path):
         vocab_transform[ln] = load_vocab(vocab_path)
     else:
+        logging.info(f"Building vocabulary for {ln}")
         vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(train_data, ln),
                                                         min_freq=1,
                                                         specials=special_symbols,
@@ -53,6 +63,10 @@ for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
     vocab_transform[ln].set_default_index(UNK_IDX)
+
+    # Log vocabulary details
+    logging.info(f"{ln} vocabulary size: {len(vocab_transform[ln])}")
+    logging.info(f"Sample {ln} vocabulary: {vocab_transform[ln].get_itos()[:10]}")
 
 def sequential_transforms(*transforms):
     def func(txt_input):
@@ -82,11 +96,21 @@ class TranslationDataset(torch.utils.data.Dataset):
         tgt_sample = text_transform[TGT_LANGUAGE](self.data[idx]['translation'][TGT_LANGUAGE].rstrip("\n")).tolist()
         return src_sample, tgt_sample
 
+# Create datasets
+logging.info("Creating training and validation datasets")
 train_dataset = TranslationDataset(train_data)
 val_dataset = TranslationDataset(val_data)
+
+# Log some sample data
+for i in range(3):
+    src_sample, tgt_sample = train_dataset[i]
+    logging.info(f"Sample {i} - Src: {src_sample}, Tgt: {tgt_sample}")
 
 # Save datasets to pickle files
 with open('train_dataset.pkl', 'wb') as f:
     pickle.dump(train_dataset, f)
+logging.info("Training dataset saved to train_dataset.pkl")
+
 with open('val_dataset.pkl', 'wb') as f:
     pickle.dump(val_dataset, f)
+logging.info("Validation dataset saved to val_dataset.pkl")
