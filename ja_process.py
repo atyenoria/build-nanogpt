@@ -20,7 +20,9 @@ token_transform[TGT_LANGUAGE] = get_tokenizer('spacy', language='ja_core_news_sm
 def yield_tokens(data_iter, language):
     language_index = {SRC_LANGUAGE: 'translation', TGT_LANGUAGE: 'translation'}
     for data_sample in data_iter:
-        yield token_transform[language](data_sample[language_index[language]][language])
+        tokens = token_transform[language](data_sample[language_index[language]][language])
+        logging.debug(f"Tokenizing {data_sample[language_index[language]][language]} -> {tokens}")
+        yield tokens
 
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 special_symbols = ['<unk>', '<pad>', '<bos>', '<eos>']
@@ -40,13 +42,15 @@ def load_vocab(path: str) -> Vocab:
     return vocab
 
 def load_and_select_dataset(src_lang, tgt_lang, num_samples=50000):
+    logging.info("Loading dataset")
     dataset = load_dataset('opus100', f'{src_lang}-{tgt_lang}')
+    logging.info("Selecting samples from dataset")
     selected_samples = dataset['train'].select(range(num_samples))
     return selected_samples, dataset['validation']
 
 # Load and select 50,000 samples from the dataset
 logging.info("Loading and selecting dataset")
-train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=50000)
+train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=100000)
 logging.info(f"Loaded {len(train_data)} training samples and {len(val_data)} validation samples")
 
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
@@ -92,8 +96,18 @@ class TranslationDataset(torch.utils.data.Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        src_sample = text_transform[SRC_LANGUAGE](self.data[idx]['translation'][SRC_LANGUAGE].rstrip("\n")).tolist()
-        tgt_sample = text_transform[TGT_LANGUAGE](self.data[idx]['translation'][TGT_LANGUAGE].rstrip("\n")).tolist()
+        src_text = self.data[idx]['translation'][SRC_LANGUAGE].rstrip("\n")
+        tgt_text = self.data[idx]['translation'][TGT_LANGUAGE].rstrip("\n")
+        
+        logging.debug(f"Original Src: {src_text}")
+        logging.debug(f"Original Tgt: {tgt_text}")
+        
+        src_sample = text_transform[SRC_LANGUAGE](src_text).tolist()
+        tgt_sample = text_transform[TGT_LANGUAGE](tgt_text).tolist()
+        
+        logging.debug(f"Transformed Src: {src_sample}")
+        logging.debug(f"Transformed Tgt: {tgt_sample}")
+        
         return src_sample, tgt_sample
 
 # Create datasets
@@ -114,3 +128,4 @@ logging.info("Training dataset saved to train_dataset.pkl")
 with open('val_dataset.pkl', 'wb') as f:
     pickle.dump(val_dataset, f)
 logging.info("Validation dataset saved to val_dataset.pkl")
+

@@ -136,7 +136,7 @@ def tensor_transform(token_ids: List[int]):
 
 text_transform = {}
 for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    text_transform[ln] = sequential_transforms(token_transform[ln], vocab_transform[ln].lookup_indices, tensor_transform)
+    text_transform[ln] = sequential_transforms(token_transform[ln], vocab_transform[ln], tensor_transform)
 
 class TranslationDataset(Dataset):
     def __init__(self, data):
@@ -191,7 +191,8 @@ def train_epoch(model, optimizer, train_dataloader):
             # Decode a single sample for logging
             src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
             tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
-            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in logits.argmax(dim=-1)[:, 0].tolist() if idx != PAD_IDX])
+            pred_tokens = logits.argmax(dim=-1)[:, 0].tolist()
+            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in pred_tokens if idx != PAD_IDX])
             
             # Log the decoded sentences and loss
             logging.info(f"Iteration {i+1}/{len(train_dataloader)}: Loss = {loss.item()}")
@@ -229,7 +230,8 @@ def evaluate(model, val_dataloader):
             # Decode a single sample for logging
             src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
             tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
-            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in logits.argmax(dim=-1)[:, 0].tolist() if idx != PAD_IDX])
+            pred_tokens = logits.argmax(dim=-1)[:, 0].tolist()
+            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in pred_tokens if idx != PAD_IDX])
             
             logging.info(f"Validation - Src: {src_sentence}")
             logging.info(f"Validation - True Tgt: {tgt_sentence}")
@@ -242,6 +244,7 @@ def evaluate(model, val_dataloader):
 
 if __name__ == "__main__":
     # Load datasets
+    logging.info("Loading datasets")
     with open('train_dataset.pkl', 'rb') as f:
         train_dataset = pickle.load(f)
     with open('val_dataset.pkl', 'rb') as f:
