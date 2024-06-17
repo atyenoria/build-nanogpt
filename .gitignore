@@ -3,3 +3,4 @@ edu_fineweb10B
 *.pkl
 nohup.*
 cache*
+spm_*

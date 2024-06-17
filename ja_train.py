@@ -1,6 +1,3 @@
-import torchtext
-torchtext.disable_torchtext_deprecation_warning()
-
 import os
 import math
 import logging
@@ -12,10 +9,9 @@ from torch.utils.data import DataLoader, Dataset
 from torch import Tensor
 from timeit import default_timer as timer
 import pickle
-from torchtext.vocab import Vocab
-from torchtext.data.utils import get_tokenizer
 from typing import List
 from tqdm import tqdm
+import sentencepiece as spm
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -23,8 +19,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 SRC_LANGUAGE = 'en'
 TGT_LANGUAGE = 'ja'
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
-BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 2
+BATCH_SIZE = 64
+GRADIENT_ACCUMULATION_STEPS = 4
 NUM_EPOCHS = 36
 EMB_SIZE = 512
 NHEAD = 8
@@ -33,25 +29,9 @@ NUM_ENCODER_LAYERS = 3
 NUM_DECODER_LAYERS = 3
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# Load vocabularies
-cache_dir = 'cache'
-def load_vocab(path: str) -> Vocab:
-    with open(path, 'rb') as f:
-        return pickle.load(f)
-
-vocab_transform = {
-    SRC_LANGUAGE: load_vocab(os.path.join(cache_dir, f'{SRC_LANGUAGE}_vocab.pkl')),
-    TGT_LANGUAGE: load_vocab(os.path.join(cache_dir, f'{TGT_LANGUAGE}_vocab.pkl'))
-}
-
-for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    vocab_transform[ln].set_default_index(UNK_IDX)
-
-# Tokenizers
-token_transform = {
-    SRC_LANGUAGE: get_tokenizer('spacy', language='en_core_web_sm'),
-    TGT_LANGUAGE: get_tokenizer('spacy', language='ja_core_news_sm')
-}
+# Load SentencePiece models
+src_sp = spm.SentencePieceProcessor(model_file='spm_en.model')
+tgt_sp = spm.SentencePieceProcessor(model_file='spm_ja.model')
 
 # Transformer model definition
 class PositionalEncoding(nn.Module):
@@ -122,34 +102,6 @@ def create_mask(src, tgt):
     return src_mask, tgt_mask, src_padding_mask, tgt_padding_mask
 
 # Data preparation
-def sequential_transforms(*transforms):
-    def func(txt_input):
-        for transform in transforms:
-            txt_input = transform(txt_input)
-        return txt_input
-    return func
-
-def tensor_transform(token_ids: List[int]):
-    return torch.cat((torch.tensor([BOS_IDX]),
-                      torch.tensor(token_ids),
-                      torch.tensor([EOS_IDX])))
-
-text_transform = {}
-for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
-    text_transform[ln] = sequential_transforms(token_transform[ln], vocab_transform[ln], tensor_transform)
-
-class TranslationDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        src_sample = text_transform[SRC_LANGUAGE](self.data[idx]['translation'][SRC_LANGUAGE].rstrip("\n")).tolist()
-        tgt_sample = text_transform[TGT_LANGUAGE](self.data[idx]['translation'][TGT_LANGUAGE].rstrip("\n")).tolist()
-        return src_sample, tgt_sample
-
 def collate_fn(batch):
     src_batch, tgt_batch = [], []
     for src_sample, tgt_sample in batch:
@@ -160,8 +112,28 @@ def collate_fn(batch):
     tgt_batch = pad_sequence(tgt_batch, padding_value=PAD_IDX)
     return src_batch, tgt_batch
 
+class TranslationDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        src_text = self.data[idx]['translation'][SRC_LANGUAGE].rstrip("\n")
+        tgt_text = self.data[idx]['translation'][TGT_LANGUAGE].rstrip("\n")
+        
+        # Tokenize the raw text
+        src_tokens = src_sp.encode(src_text, out_type=int)
+        tgt_tokens = tgt_sp.encode(tgt_text, out_type=int)
+        
+        src_sample = [BOS_IDX] + src_tokens + [EOS_IDX]
+        tgt_sample = [BOS_IDX] + tgt_tokens + [EOS_IDX]
+        
+        return src_sample, tgt_sample
+
 # Model training and evaluation
-def train_epoch(model, optimizer, train_dataloader):
+def train_epoch(model, optimizer, train_dataloader, scaler):
     model.train()
     losses = 0
     start_time = timer()
@@ -175,24 +147,30 @@ def train_epoch(model, optimizer, train_dataloader):
 
         src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
 
-        logits = model(src, tgt_input, src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, src_padding_mask)
+        with torch.cuda.amp.autocast():
+            logits = model(src, tgt_input, src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, src_padding_mask)
+            tgt_out = tgt[1:, :]
+            loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
 
-        tgt_out = tgt[1:, :]
-        loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
-        loss.backward()
+        scaler.scale(loss).backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         if (i + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
 
         losses += loss.item()
 
         if (i + 1) % 500 == 0:  # Log every 500 iterations
+            torch.cuda.empty_cache()  # Clear GPU cache
             # Decode a single sample for logging
-            src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
-            tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
+            src_sentence = src_sp.decode([idx for idx in src[:, 0].tolist() if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
+            tgt_sentence = tgt_sp.decode([idx for idx in tgt[:, 0].tolist() if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
             pred_tokens = logits.argmax(dim=-1)[:, 0].tolist()
-            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in pred_tokens if idx != PAD_IDX])
+            pred_sentence = tgt_sp.decode([idx for idx in pred_tokens if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
             
             # Log the decoded sentences and loss
             logging.info(f"Iteration {i+1}/{len(train_dataloader)}: Loss = {loss.item()}")
@@ -228,10 +206,10 @@ def evaluate(model, val_dataloader):
             losses += loss.item()
 
             # Decode a single sample for logging
-            src_sentence = " ".join([vocab_transform[SRC_LANGUAGE].lookup_token(idx) for idx in src[:, 0].tolist() if idx != PAD_IDX])
-            tgt_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in tgt[:, 0].tolist() if idx != PAD_IDX])
+            src_sentence = src_sp.decode([idx for idx in src[:, 0].tolist() if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
+            tgt_sentence = tgt_sp.decode([idx for idx in tgt[:, 0].tolist() if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
             pred_tokens = logits.argmax(dim=-1)[:, 0].tolist()
-            pred_sentence = " ".join([vocab_transform[TGT_LANGUAGE].lookup_token(idx) for idx in pred_tokens if idx != PAD_IDX])
+            pred_sentence = tgt_sp.decode([idx for idx in pred_tokens if idx != BOS_IDX and idx != EOS_IDX and idx != PAD_IDX])
             
             logging.info(f"Validation - Src: {src_sentence}")
             logging.info(f"Validation - True Tgt: {tgt_sentence}")
@@ -255,7 +233,7 @@ if __name__ == "__main__":
 
     # Initialize model, loss function, and optimizer
     transformer = Seq2SeqTransformer(NUM_ENCODER_LAYERS, NUM_DECODER_LAYERS, EMB_SIZE, NHEAD, 
-                                     len(vocab_transform[SRC_LANGUAGE]), len(vocab_transform[TGT_LANGUAGE]), FFN_HID_DIM)
+                                     src_sp.get_piece_size(), tgt_sp.get_piece_size(), FFN_HID_DIM)
     transformer = transformer.to(DEVICE)
 
     for p in transformer.parameters():
@@ -263,7 +241,8 @@ if __name__ == "__main__":
             nn.init.xavier_uniform_(p)
 
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-    optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=0.00005, betas=(0.9, 0.98), eps=1e-9)  # Reduced learning rate
+    scaler = torch.cuda.amp.GradScaler()  # Mixed precision training
 
     # Training loop
     model_dir = "saved_models"
@@ -272,7 +251,7 @@ if __name__ == "__main__":
     for epoch in range(1, NUM_EPOCHS + 1):
         logging.info(f"Starting epoch {epoch}/{NUM_EPOCHS}")
         start_time = timer()
-        train_loss = train_epoch(transformer, optimizer, train_dataloader)
+        train_loss = train_epoch(transformer, optimizer, train_dataloader, scaler)
         val_loss = evaluate(transformer, val_dataloader)
         end_time = timer()
         epoch_time = end_time - start_time
