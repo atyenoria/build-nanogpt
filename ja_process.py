@@ -28,7 +28,7 @@ def train_sentencepiece_model(data, model_prefix, vocab_size=32000):
 
 if not os.path.exists("spm_en.model"):
     dataset = load_dataset('opus100', f'{SRC_LANGUAGE}-{TGT_LANGUAGE}')
-    train_data = dataset['train'].select(range(50000))
+    train_data = dataset['train']
     train_sentencepiece_model([sample['translation'][SRC_LANGUAGE] for sample in train_data], "spm_en")
     train_sentencepiece_model([sample['translation'][TGT_LANGUAGE] for sample in train_data], "spm_ja")
 
@@ -53,16 +53,16 @@ def load_vocab(path: str):
     logging.info(f"Vocabulary loaded from {path}")
     return vocab
 
-def load_and_select_dataset(src_lang, tgt_lang, num_samples):
+def load_and_select_dataset(src_lang, tgt_lang):
     logging.info("Loading dataset")
     dataset = load_dataset('opus100', f'{src_lang}-{tgt_lang}')
     logging.info("Selecting samples from dataset")
-    selected_samples = dataset['train'].select(range(num_samples))
+    selected_samples = dataset['train']
     return selected_samples, dataset['validation']
 
 # Load and select 50,000 samples from the dataset
 logging.info("Loading and selecting dataset")
-train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE, num_samples=100000)
+train_data, val_data = load_and_select_dataset(SRC_LANGUAGE, TGT_LANGUAGE)
 logging.info(f"Loaded {len(train_data)} training samples and {len(val_data)} validation samples")
 
 def sequential_transforms(*transforms):
