@@ -1,6 +1,10 @@
+*.txt
+*.model
 saved_models*
 edu_fineweb10B
 *.pkl
 nohup.*
 cache*
 spm_*
+*.vocab
+*.pth
